@@ -1,169 +1,229 @@
 #!/bin/sh
-# Keep macOS awake while the Herdr server runs, using caffeinate(8).
+# Herdr Caffeinated: keep macOS awake while Herdr agents work.
 #
-# Usage: caffeinated.sh start|stop|status|toggle
+# Usage: caffeinated.sh reconcile|pause|resume|toggle|status
 #
-# The caffeinate process waits on the Herdr server PID (-w), so the sleep
-# assertion is released automatically when the server exits.
+# Herdr runs "reconcile" at startup and on agent, pane, tab, and workspace
+# events. While an agent works, "caffeinate -w <server pid>" holds a sleep
+# assertion. When no agent works, "caffeinate -t <grace> -w <server pid>"
+# replaces it, so the assertion ends on its own after the grace period.
+# -w also ends it when the Herdr server exits.
+#
+# Test-only overrides: CAFFEINATED_BIN, CAFFEINATED_SERVER_PID,
+# CAFFEINATED_TIMEOUT.
 
 set -u
+# System tools first, so GNU coreutils in the user's PATH cannot shadow them.
+PATH=/usr/bin:/bin:/usr/sbin:/sbin:$PATH
 
-STATE_DIR="${HERDR_PLUGIN_STATE_DIR:-${TMPDIR:-/tmp}/herdr-caffeinated}"
-CONFIG_DIR="${HERDR_PLUGIN_CONFIG_DIR:-}"
-PID_FILE="$STATE_DIR/caffeinate.pid"
-PAUSED_FILE="$STATE_DIR/paused"
-LOG_FILE="$STATE_DIR/caffeinated.log"
-HERDR="${HERDR_BIN_PATH:-herdr}"
+HERDR=${HERDR_BIN_PATH:-herdr}
+CAFFEINATE=${CAFFEINATED_BIN:-/usr/bin/caffeinate}
+SERVER_PID=${CAFFEINATED_SERVER_PID:-$PPID} # hooks are children of the server
+TIMEOUT=${CAFFEINATED_TIMEOUT:-5}
+LOCK_TIMEOUT=30
 
-# -i: block idle sleep. -m: block disk idle sleep.
-# -s: block system sleep (honored by macOS only on AC power).
-# Override in $HERDR_PLUGIN_CONFIG_DIR/config with CAFFEINATE_FLAGS="-dims".
-CAFFEINATE_FLAGS="-ims"
-NOTIFY=1
-if [ -n "$CONFIG_DIR" ] && [ -f "$CONFIG_DIR/config" ]; then
-  # shellcheck disable=SC1091
-  . "$CONFIG_DIR/config"
-fi
+# Defaults. Override in $HERDR_PLUGIN_CONFIG_DIR/config.
+FLAGS=-ims
+GRACE=60
+AWAKE_STATUSES=working
 
-mkdir -p "$STATE_DIR"
+# perl [lock_seconds] [timeout] [argv...]
+# lock_seconds > 0: take an exclusive flock on fd 9. The lock belongs to the
+# shell's open file, so it stays held until the shell closes fd 9 or exits.
+# argv: run it in its own process group; kill the group after the timeout.
+# shellcheck disable=SC2016 # perl code, not shell
+PERL_RUN='
+use Fcntl ":flock";
+my ($lock, $timeout) = splice @ARGV, 0, 2;
+if ($lock) {
+  open(my $fh, ">&=", 9) or exit 125;
+  local $SIG{ALRM} = sub { exit 75 };
+  alarm $lock;
+  flock($fh, LOCK_EX) or exit 75;
+  alarm 0;
+}
+exit 0 unless @ARGV;
+my $pid = fork() // exit 125;
+if (!$pid) { setpgrp(0, 0); exec @ARGV or exit 127 }
+$SIG{ALRM} = sub { kill "KILL", -$pid, $pid; waitpid $pid, 0; exit 124 };
+alarm $timeout;
+waitpid $pid, 0;
+exit($? & 127 ? 1 : $? >> 8);
+'
 
-log() {
-  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S')" "$*" >>"$LOG_FILE"
-  printf '%s\n' "$*"
+run_timed() {
+  /usr/bin/perl -e "$PERL_RUN" "$@"
 }
 
-notify() {
-  [ "$NOTIFY" = 1 ] || return 0
-  "$HERDR" notification show "$1" --body "$2" --sound none >/dev/null 2>&1 || true
-}
-
-is_herdr_server() {
-  case "$(ps -o command= -p "$1" 2>/dev/null)" in
-    *herdr\ server*) return 0 ;;
-  esac
-  return 1
-}
-
-# Find the Herdr server PID. Prefer our own ancestor chain, because hooks and
-# actions are spawned by the server. Fall back to the process that owns the
-# API socket.
-find_server_pid() {
-  pid=$$
-  while [ -n "$pid" ] && [ "$pid" -gt 1 ]; do
-    if is_herdr_server "$pid"; then
-      echo "$pid"
-      return 0
-    fi
-    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
-  done
-
-  if [ -n "${HERDR_SOCKET_PATH:-}" ] && command -v lsof >/dev/null 2>&1; then
-    for pid in $(lsof -t "$HERDR_SOCKET_PATH" 2>/dev/null); do
-      if is_herdr_server "$pid"; then
-        echo "$pid"
-        return 0
-      fi
-    done
-  fi
-  return 1
-}
-
-running_pid() {
-  [ -f "$PID_FILE" ] || return 1
-  pid=$(cat "$PID_FILE" 2>/dev/null)
-  [ -n "$pid" ] || return 1
-  case "$(ps -o command= -p "$pid" 2>/dev/null)" in
-    *caffeinate*) echo "$pid"; return 0 ;;
-  esac
-  rm -f "$PID_FILE"
-  return 1
-}
-
-do_start() {
-  if ! command -v caffeinate >/dev/null 2>&1; then
-    log "caffeinate not found; this plugin needs macOS"
-    return 1
-  fi
-
-  server_pid=$(find_server_pid) || {
-    log "cannot find the herdr server process"
+lock() {
+  exec 9>>"$SESSION_DIR/lock"
+  run_timed "$LOCK_TIMEOUT" 0 || {
+    echo "error: lock busy" >&2
     return 1
   }
+}
 
-  if pid=$(running_pid); then
-    # A previous server (for example before a live handoff) may own it.
-    case "$(ps -o command= -p "$pid" 2>/dev/null)" in
-      *"-w $server_pid"*)
-        log "already active (caffeinate pid $pid, herdr server pid $server_pid)"
-        return 0
+unlock() {
+  exec 9>&-
+}
+
+toast() {
+  run_timed 0 "$TIMEOUT" "$HERDR" notification show "Caffeinated" \
+    --body "$1" --sound none >/dev/null 2>&1
+}
+
+load_config() {
+  file=${HERDR_PLUGIN_CONFIG_DIR:-}/config
+  [ -n "${HERDR_PLUGIN_CONFIG_DIR:-}" ] && [ -f "$file" ] || return 0
+  while IFS='= 	' read -r key value || [ -n "$key" ]; do
+    case $value in \"*\") value=${value#\"} value=${value%\"} ;; esac
+    case $key in
+      '' | \#*) continue ;;
+      caffeinate_flags)
+        case $value in -*[!dimsu]* | - | '') ;; -*) FLAGS=$value && continue ;; esac
+        ;;
+      idle_grace_seconds)
+        case $value in '' | *[!0-9]* | 0*) ;; *) GRACE=$value && continue ;; esac
+        ;;
+      awake_statuses)
+        case $value in '' | *[!a-z_,]*) ;; *) AWAKE_STATUSES=$value && continue ;; esac
         ;;
     esac
-    kill "$pid" 2>/dev/null
-    rm -f "$PID_FILE"
-  fi
+    echo "config: ignored $key=$value" >&2
+  done <"$file"
+}
 
-  # Detach fully so the hook can exit while caffeinate keeps running.
-  # shellcheck disable=SC2086
-  nohup caffeinate $CAFFEINATE_FLAGS -w "$server_pid" </dev/null >/dev/null 2>&1 &
-  pid=$!
-  echo "$pid" >"$PID_FILE"
+# Succeed if the agent list JSON has an agent in one of AWAKE_STATUSES.
+agents_awake() {
+  old_ifs=$IFS
+  IFS=,
+  for status in $AWAKE_STATUSES; do
+    case $1 in *"\"agent_status\":\"$status\""*) IFS=$old_ifs && return 0 ;; esac
+  done
+  IFS=$old_ifs
+  return 1
+}
+
+# Set CUR_PID and CUR_MODE (hold or grace) for this session's caffeinate.
+# Only an exact "-w <server pid>" match counts, so a reused PID never does.
+find_caffeinate() {
+  CUR_PID='' CUR_MODE=''
+  [ -f "$PID_FILE" ] && read -r pid <"$PID_FILE" || return 1
+  case $(ps -o state=,command= -p "$pid" 2>/dev/null) in
+    Z*) return 1 ;;
+    *caffeinate*" -t "*" -w $SERVER_PID") CUR_MODE=grace ;;
+    *caffeinate*" -w $SERVER_PID") CUR_MODE=hold ;;
+    *) return 1 ;;
+  esac
+  CUR_PID=$pid
+}
+
+# Start caffeinate with extra args ("-t GRACE" or none), then stop the
+# process it replaces, so the assertion has no gap.
+start_caffeinate() {
+  if [ -z "${CAFFEINATED_SERVER_PID:-}" ]; then
+    case $(ps -o command= -p "$SERVER_PID" 2>/dev/null) in
+      *herdr*) ;;
+      *)
+        echo "error: parent pid $SERVER_PID is not the herdr server" >&2
+        return 1
+        ;;
+    esac
+  fi
+  # shellcheck disable=SC2086 # FLAGS is validated to -[dimsu]+
+  nohup "$CAFFEINATE" $FLAGS "$@" -w "$SERVER_PID" </dev/null >/dev/null 2>&1 9>&- &
+  echo "$!" >"$PID_FILE"
+  [ -n "$CUR_PID" ] && kill "$CUR_PID" 2>/dev/null
+  echo "caffeinate $FLAGS${1:+ $*} -w $SERVER_PID (pid $!)"
+}
+
+stop_caffeinate() {
+  [ -n "$CUR_PID" ] || return 0
+  kill "$CUR_PID" 2>/dev/null
+  rm -f "$PID_FILE"
+  echo "released caffeinate pid $CUR_PID"
+}
+
+cmd_reconcile() {
+  exec 9>>"$SESSION_DIR/lock"
+  agents=$(run_timed "$LOCK_TIMEOUT" "$TIMEOUT" "$HERDR" agent list 2>/dev/null)
+  rc=$?
+  if [ "$rc" -eq 75 ]; then
+    echo "error: lock busy" >&2
+    return 1
+  fi
+  find_caffeinate
+  if [ -f "$PAUSED_FILE" ]; then
+    stop_caffeinate
+  elif [ "$rc" -ne 0 ]; then
+    echo "error: herdr agent list failed (exit $rc); state kept" >&2
+    return 1
+  elif agents_awake "$agents"; then
+    [ "$CUR_MODE" = hold ] || start_caffeinate
+  elif [ "$CUR_MODE" = hold ]; then
+    start_caffeinate -t "$GRACE"
+  fi
+}
+
+cmd_pause() {
+  lock || return 1
+  touch "$PAUSED_FILE"
+  find_caffeinate
+  stop_caffeinate
+  unlock
+  toast "Paused. Mac can sleep."
+}
+
+cmd_resume() {
+  lock || return 1
   rm -f "$PAUSED_FILE"
-  log "active: caffeinate $CAFFEINATE_FLAGS -w $server_pid (pid $pid)"
-}
-
-do_stop() {
-  if pid=$(running_pid); then
-    kill "$pid" 2>/dev/null
-    rm -f "$PID_FILE"
-    log "stopped caffeinate pid $pid"
+  unlock
+  if cmd_reconcile; then
+    unlock
+    toast "On. Mac stays awake while agents work."
   else
-    log "not active"
+    unlock
+    toast "On, but the agent check failed. See the plugin log."
+    return 1
   fi
 }
 
-do_status() {
-  if pid=$(running_pid); then
-    msg="Active: $(ps -o command= -p "$pid" | sed 's/^ *//') (pid $pid)"
-  elif [ -f "$PAUSED_FILE" ]; then
-    msg="Paused. Mac can sleep."
+cmd_status() {
+  find_caffeinate
+  if [ -f "$PAUSED_FILE" ]; then
+    state=paused text="Paused. Mac can sleep."
+  elif [ "$CUR_MODE" = hold ]; then
+    state=awake text="Awake while agents work."
+  elif [ "$CUR_MODE" = grace ]; then
+    state=releasing text="No agent works. Mac can sleep in ${GRACE}s or less."
   else
-    msg="Inactive. Mac can sleep."
+    state=idle text="Idle. Mac can sleep until an agent works."
   fi
-  echo "$msg"
-  notify "Caffeinated" "$msg"
+  echo "state=$state pid=${CUR_PID:--} server_pid=$SERVER_PID grace=$GRACE flags=$FLAGS"
+  toast "$text"
 }
 
-case "${1:-status}" in
-  startup)
-    # Respect a manual pause across server restarts.
-    if [ -f "$PAUSED_FILE" ]; then
-      log "paused; skipping startup"
-      exit 0
-    fi
-    do_start
-    ;;
-  start)
-    do_start && notify "Caffeinated" "Mac stays awake while herdr runs."
-    ;;
-  stop)
-    do_stop
-    touch "$PAUSED_FILE"
-    notify "Caffeinated" "Paused. Mac can sleep."
-    ;;
-  toggle)
-    if running_pid >/dev/null; then
-      do_stop
-      touch "$PAUSED_FILE"
-      notify "Caffeinated" "Paused. Mac can sleep."
-    else
-      do_start && notify "Caffeinated" "Mac stays awake while herdr runs."
-    fi
-    ;;
-  status)
-    do_status
-    ;;
+case ${1:-} in
+  reconcile | pause | resume | toggle | status) ;;
   *)
-    echo "usage: $0 start|stop|toggle|status" >&2
+    echo "usage: $0 reconcile|pause|resume|toggle|status" >&2
     exit 2
     ;;
+esac
+
+if [ -z "${HERDR_PLUGIN_STATE_DIR:-}" ]; then
+  echo "error: run through herdr, for example:" >&2
+  echo "  herdr plugin action invoke herdr-caffeinated.status" >&2
+  exit 2
+fi
+# Plugins are shared by all Herdr sessions, so keep state per socket.
+SESSION_DIR=$HERDR_PLUGIN_STATE_DIR/session-$(/sbin/md5 -q -s "${HERDR_SOCKET_PATH:-default}")
+PID_FILE=$SESSION_DIR/caffeinate.pid
+PAUSED_FILE=$SESSION_DIR/paused
+[ -d "$SESSION_DIR" ] || mkdir -p "$SESSION_DIR"
+load_config
+
+case $1 in
+  toggle) if [ -f "$PAUSED_FILE" ]; then cmd_resume; else cmd_pause; fi ;;
+  *) "cmd_$1" ;;
 esac
