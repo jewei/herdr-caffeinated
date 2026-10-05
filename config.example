@@ -1,8 +1,17 @@
-# Copy to: $(herdr plugin config-dir jewei.caffeinated)/config
-# This file is sourced by bin/caffeinated.sh.
+# Copy to: $(herdr plugin config-dir herdr-caffeinated)/config
+# key=value lines. Invalid values are ignored.
 
-# caffeinate(8) flags. Default "-ims". Add "d" to keep the display on.
-CAFFEINATE_FLAGS="-ims"
+# caffeinate(8) flags, letters from "dimsu". Add "d" to keep the display on.
+caffeinate_flags=-ims
+
+# Seconds to wait after the last agent stops working before sleep is allowed.
+idle_grace_seconds=60
+
+# Comma list of agent statuses that keep the Mac awake.
+awake_statuses=working
+
+# Timeout for each herdr request, in seconds.
+request_timeout_seconds=5
 
 # 1 = show a herdr toast for action results, 0 = silent.
-NOTIFY=1
+notify=1
