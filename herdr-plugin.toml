@@ -1,28 +1,44 @@
-id = "jewei.caffeinated"
-name = "Caffeinated"
-version = "0.1.0"
-min_herdr_version = "0.9.3"
-description = "Keep macOS awake with caffeinate while the herdr server runs."
+id = "herdr-caffeinated"
+name = "Herdr Caffeinated"
+version = "0.2.0"
+min_herdr_version = "0.7.5"
+description = "Keep macOS awake with caffeinate while Herdr agents work."
 platforms = ["macos"]
 
 [[startup]]
-command = ["sh", "bin/caffeinated.sh", "startup"]
+command = ["sh", "bin/caffeinated.sh", "reconcile"]
+
+[[events]]
+on = "pane.agent_status_changed"
+command = ["sh", "bin/caffeinated.sh", "reconcile"]
+
+[[events]]
+on = "pane.agent_detected"
+command = ["sh", "bin/caffeinated.sh", "reconcile"]
+
+[[events]]
+on = "pane.exited"
+command = ["sh", "bin/caffeinated.sh", "reconcile"]
+
+[[events]]
+on = "pane.closed"
+command = ["sh", "bin/caffeinated.sh", "reconcile"]
 
 [[actions]]
 id = "toggle"
-title = "Caffeinated: toggle keep-awake"
+title = "Caffeinated: toggle"
 contexts = ["workspace"]
 command = ["sh", "bin/caffeinated.sh", "toggle"]
 
 [[actions]]
 id = "start"
-title = "Caffeinated: keep Mac awake"
+title = "Caffeinated: on"
 contexts = ["workspace"]
 command = ["sh", "bin/caffeinated.sh", "start"]
 
 [[actions]]
 id = "stop"
-title = "Caffeinated: allow sleep"
+title = "Caffeinated: pause"
 contexts = ["workspace"]
 command = ["sh", "bin/caffeinated.sh", "stop"]
 
