@@ -1,6 +1,6 @@
 id = "herdr-caffeinated"
 name = "Herdr Caffeinated"
-version = "0.2.0"
+version = "0.3.0"
 min_herdr_version = "0.7.5"
 description = "Keep macOS awake with caffeinate while Herdr agents work."
 platforms = ["macos"]
@@ -24,23 +24,32 @@ command = ["sh", "bin/caffeinated.sh", "reconcile"]
 on = "pane.closed"
 command = ["sh", "bin/caffeinated.sh", "reconcile"]
 
+# Closing a tab or workspace does not emit pane.closed for its panes.
+[[events]]
+on = "tab.closed"
+command = ["sh", "bin/caffeinated.sh", "reconcile"]
+
+[[events]]
+on = "workspace.closed"
+command = ["sh", "bin/caffeinated.sh", "reconcile"]
+
 [[actions]]
 id = "toggle"
-title = "Caffeinated: toggle"
+title = "Caffeinated: toggle pause"
 contexts = ["workspace"]
 command = ["sh", "bin/caffeinated.sh", "toggle"]
 
 [[actions]]
-id = "start"
-title = "Caffeinated: on"
-contexts = ["workspace"]
-command = ["sh", "bin/caffeinated.sh", "start"]
-
-[[actions]]
-id = "stop"
+id = "pause"
 title = "Caffeinated: pause"
 contexts = ["workspace"]
-command = ["sh", "bin/caffeinated.sh", "stop"]
+command = ["sh", "bin/caffeinated.sh", "pause"]
+
+[[actions]]
+id = "resume"
+title = "Caffeinated: resume"
+contexts = ["workspace"]
+command = ["sh", "bin/caffeinated.sh", "resume"]
 
 [[actions]]
 id = "status"
