@@ -14,3 +14,7 @@ idle_grace_seconds = 60
 # A comma list of the agent statuses that keep the Mac awake. Herdr reports
 # "idle", "working", "blocked", "done", and "unknown".
 awake_statuses = working
+
+# The number of seconds between two watchdog checks. The value 0 turns the
+# watchdog off.
+watchdog_seconds = 30
