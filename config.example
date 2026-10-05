@@ -1,17 +1,12 @@
 # Copy to: $(herdr plugin config-dir herdr-caffeinated)/config
-# key=value lines. Invalid values are ignored.
+# key = value lines. Unknown keys and invalid values are ignored and logged.
 
-# caffeinate(8) flags, letters from "dimsu". Add "d" to keep the display on.
-caffeinate_flags=-ims
+# caffeinate(8) flags: a dash and letters from "dimsu".
+# Add "d" to keep the display on.
+caffeinate_flags = -ims
 
-# Seconds to wait after the last agent stops working before sleep is allowed.
-idle_grace_seconds=60
+# Seconds to stay awake after the last agent stops working.
+idle_grace_seconds = 60
 
 # Comma list of agent statuses that keep the Mac awake.
-awake_statuses=working
-
-# Timeout for each herdr request, in seconds.
-request_timeout_seconds=5
-
-# 1 = show a herdr toast for action results, 0 = silent.
-notify=1
+awake_statuses = working
