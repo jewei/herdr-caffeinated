@@ -1,0 +1,33 @@
+id = "jewei.caffeinated"
+name = "Caffeinated"
+version = "0.1.0"
+min_herdr_version = "0.9.3"
+description = "Keep macOS awake with caffeinate while the herdr server runs."
+platforms = ["macos"]
+
+[[startup]]
+command = ["sh", "bin/caffeinated.sh", "startup"]
+
+[[actions]]
+id = "toggle"
+title = "Caffeinated: toggle keep-awake"
+contexts = ["workspace"]
+command = ["sh", "bin/caffeinated.sh", "toggle"]
+
+[[actions]]
+id = "start"
+title = "Caffeinated: keep Mac awake"
+contexts = ["workspace"]
+command = ["sh", "bin/caffeinated.sh", "start"]
+
+[[actions]]
+id = "stop"
+title = "Caffeinated: allow sleep"
+contexts = ["workspace"]
+command = ["sh", "bin/caffeinated.sh", "stop"]
+
+[[actions]]
+id = "status"
+title = "Caffeinated: status"
+contexts = ["workspace"]
+command = ["sh", "bin/caffeinated.sh", "status"]
