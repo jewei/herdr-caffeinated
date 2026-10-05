@@ -1,12 +1,16 @@
-# Copy to: $(herdr plugin config-dir herdr-caffeinated)/config
-# key = value lines. Unknown keys and invalid values are ignored and logged.
+# Copy this file to the directory that this command prints:
+#   herdr plugin config-dir herdr-caffeinated
+# Name the copy "config". Each line is "key = value".
+# The plugin ignores an unknown key or an invalid value and logs it.
 
-# caffeinate(8) flags: a dash and letters from "dimsu".
-# Add "d" to keep the display on.
+# The flags that the plugin passes to caffeinate(8). Use a dash and letters
+# from "dimsu". The "d" flag keeps the display on.
 caffeinate_flags = -ims
 
-# Seconds to stay awake after the last agent stops working.
+# The number of seconds that the Mac stays awake after the last agent stops
+# work.
 idle_grace_seconds = 60
 
-# Comma list of agent statuses that keep the Mac awake.
+# A comma list of the agent statuses that keep the Mac awake. Herdr reports
+# "idle", "working", "blocked", "done", and "unknown".
 awake_statuses = working
