@@ -16,8 +16,11 @@ T=$(CDPATH='' cd -- "$T" && pwd) # normalize "//" so pgrep patterns match
 SCRIPT=$T/plugin/bin/caffeinated.sh
 N=0
 FAILED=0
+SERVERS='' # real server processes that the cleanup stops
 
 cleanup() {
+  # shellcheck disable=SC2086
+  [ -n "$SERVERS" ] && kill $SERVERS 2>/dev/null
   pkill -f "$T/" 2>/dev/null
   rm -rf "$T"
 }
@@ -59,7 +62,7 @@ while [ -e "$FAKE_DIR/servers/$w" ]; do
 done
 EOF
 chmod +x "$T/bin/herdr" "$T/bin/caffeinate"
-echo 'idle_grace_seconds=1' >"$T/config/config"
+printf '%s\n' 'idle_grace_seconds=1' 'watchdog_seconds=0' >"$T/config/config"
 
 # run SESSION SERVER_PID COMMAND: sets OUT (stdout) and RC.
 run() {
@@ -153,7 +156,7 @@ check "hung herdr keeps state" 'caf a' "-ims -w 10698"
 # Status, pause, resume, toggle
 set_status working
 run a 10698 status
-check "status reports awake" 'echo "$OUT"' "state=awake pid=$(pid_of a) server_pid=10698 grace=1 flags=-ims"
+check "status reports awake" 'echo "$OUT"' "state=awake pid=$(pid_of a) server_pid=10698 grace=1 flags=-ims watchdog=-"
 run a 10698 pause
 check "pause releases" 'caf a' none
 eventually "pause leaves no process" count 0
@@ -212,18 +215,87 @@ check "10 concurrent hooks start one process" count 1
 # Config
 server_up 40000
 printf '%s\n' '# comment' 'idle_grace_seconds = 1' 'awake_statuses = "working,blocked"' \
-  'caffeinate_flags=-dims' >"$T/config/config"
+  'caffeinate_flags=-dims' 'watchdog_seconds=0' >"$T/config/config"
 set_status blocked
 run d 40000 reconcile
 check "awake_statuses and flags apply" 'caf d' "-dims -w 40000"
 printf '%s\n' 'idle_grace_seconds=1' 'caffeinate_flags=-w' >"$T/config/config"
 run d 40000 status
-check "invalid flags fall back to the default" 'echo "${OUT##* }"' flags=-ims
+check "invalid flags fall back to the default" 'echo "$OUT" | grep -o "flags=[^ ]*"' flags=-ims
 check "invalid config is reported" 'cat "$T/stderr"' "config: ignored caffeinate_flags=-w"
 
 # Command line
 check "unknown command exits 2" 'sh "$SCRIPT" bogus 2>/dev/null; echo $?' 2
 check "run outside herdr exits 2" 'HERDR_PLUGIN_STATE_DIR= sh "$SCRIPT" status 2>/dev/null; echo $?' 2
+
+# Watchdog. Servers here are real processes, because the watchdog exits
+# when kill -0 on its server pid fails.
+wd_count() { pgrep -f "$SCRIPT watchdog $1\$" | wc -l | tr -d ' '; }
+new_server() {
+  sleep 600 &
+  SERVER=$!
+  SERVERS="$SERVERS $SERVER"
+  server_up "$SERVER"
+}
+
+printf '%s\n' 'idle_grace_seconds=1' 'watchdog_seconds=1' >"$T/config/config"
+new_server
+W=$SERVER
+set_status idle
+run w "$W" reconcile
+eventually "a hook starts the watchdog" "wd_count $W" 1
+set_status working
+eventually "watchdog holds after a missed working event" 'caf w' "-ims -w $W"
+set_status idle
+eventually "watchdog releases after a missed idle event" 'caf w' none
+
+set_status working
+eventually "watchdog holds again" 'caf w' "-ims -w $W"
+lost=$(pid_of w)
+kill "$lost"
+eventually "watchdog replaces a lost caffeinate" 'caf w' "-ims -w $W"
+check "the replacement is a new process" '[ "$(pid_of w)" != "$lost" ] && echo yes' yes
+
+pkill -f "$SCRIPT watchdog $W\$"
+eventually "watchdog stopped" "wd_count $W" 0
+echo "$W" >"$(session_dir w)/watchdog.pid" # a live pid that is not a watchdog
+run w "$W" reconcile
+eventually "a hook replaces a lost watchdog and ignores a reused pid" "wd_count $W" 1
+
+run w "$W" pause
+sleep 2.5
+check "watchdog respects pause" 'caf w' none
+run w "$W" resume
+set_status hung
+sleep 2.5
+check "watchdog keeps state when herdr hangs" 'caf w' "-ims -w $W"
+set_status working
+
+new_server
+X=$SERVER
+jobs=''
+i=0
+while [ "$i" -lt 10 ]; do
+  run x "$X" reconcile &
+  jobs="$jobs $!"
+  i=$((i + 1))
+done
+# shellcheck disable=SC2086
+wait $jobs
+eventually "10 concurrent hooks start one watchdog" "wd_count $X" 1
+
+kill "$W"
+server_down "$W"
+eventually "watchdog exits with its server" "wd_count $W" 0
+
+printf '%s\n' 'idle_grace_seconds=1' 'watchdog_seconds=0' >"$T/config/config"
+new_server
+run z "$SERVER" reconcile
+sleep 0.5
+check "watchdog_seconds=0 starts no watchdog" "wd_count $SERVER" 0
+
+touch -t 203001010000 "$SCRIPT"
+eventually "watchdog exits after a plugin update" "wd_count $X" 0
 
 echo "1..$N"
 exit "$FAILED"

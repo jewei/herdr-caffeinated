@@ -1,6 +1,6 @@
 id = "herdr-caffeinated"
 name = "Herdr Caffeinated"
-version = "0.3.0"
+version = "0.4.0"
 min_herdr_version = "0.7.5"
 description = "Keep macOS awake with caffeinate while Herdr agents work."
 platforms = ["macos"]

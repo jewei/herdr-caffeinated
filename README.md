@@ -76,7 +76,7 @@ Each action applies only to the current Herdr session.
 The `status` action prints one line of `key=value` fields:
 
 ```text
-state=awake pid=43650 server_pid=10698 grace=60 flags=-ims
+state=awake pid=43650 server_pid=10698 grace=60 flags=-ims watchdog=43642
 ```
 
 | Field        | Value                                                     |
@@ -86,6 +86,7 @@ state=awake pid=43650 server_pid=10698 grace=60 flags=-ims
 | `server_pid` | The PID of the Herdr server that `caffeinate` waits on    |
 | `grace`      | The value of `idle_grace_seconds`                         |
 | `flags`      | The `caffeinate` flags in use                             |
+| `watchdog`   | The PID of the watchdog process, or `-` if none runs      |
 
 | State       | Meaning                                                            |
 | ----------- | ------------------------------------------------------------------ |
@@ -101,6 +102,7 @@ state=awake pid=43650 server_pid=10698 grace=60 flags=-ims
 | `caffeinate_flags`   | `-ims`    | A dash and letters from `dimsu`       |
 | `idle_grace_seconds` | `60`      | A positive integer                    |
 | `awake_statuses`     | `working` | A comma list of lowercase status names |
+| `watchdog_seconds`   | `30`      | A non-negative integer                 |
 
 - `caffeinate_flags` sets the flags that the plugin passes to `caffeinate`.
   The `d` flag keeps the display on.
@@ -108,6 +110,8 @@ state=awake pid=43650 server_pid=10698 grace=60 flags=-ims
   stops work.
 - `awake_statuses` sets the agent statuses that keep the Mac awake. Herdr
   reports `idle`, `working`, `blocked`, `done`, and `unknown`.
+- `watchdog_seconds` sets how often the watchdog checks the agents. The
+  value `0` turns the watchdog off.
 
 The plugin ignores an unknown key or an invalid value. It writes
 `config: ignored <key>=<value>` to the plugin log and uses the default.
@@ -161,10 +165,28 @@ The `-w` flag ties each process to the Herdr server. When the server exits,
 An earlier version ended the grace period with a background timer. If the
 timer died, the Mac stayed awake until the server exited. The `-t` flag
 moves that job into `caffeinate`, so no plugin process has to stay alive.
-The cost is that the plugin does not read the agent list again at the end of
-the grace period. The plugin depends on events instead. For this reason it
-listens for `tab.closed` and `workspace.closed`, because Herdr sends no
-`pane.closed` event for the panes in a closed tab or workspace.
+The plugin also listens for `tab.closed` and `workspace.closed`, because
+Herdr sends no `pane.closed` event for the panes in a closed tab or
+workspace.
+
+## Why a watchdog runs next to the event hooks
+
+Events alone can leave the wrong state. A hook can fail when the lock is busy
+or when `herdr agent list` times out. Herdr can also refuse a hook when too
+many plugin commands run at the same time. Something can also stop the
+`caffeinate` process. In each case, the state stays wrong until the next
+event. If the Mac sleep timer is short, the Mac can sleep while an agent
+works.
+
+For this reason, each session has one watchdog process. Every 30 seconds,
+the watchdog runs the same `reconcile` step as the hooks. It has no state of
+its own, so events and the watchdog cannot disagree. If Herdr does not
+answer, the watchdog keeps the current state, as the hooks do. Each hook
+starts the watchdog again if it is not running.
+
+The watchdog exits when the Herdr server exits. It also exits when a plugin
+update makes the script file newer than its PID file. The next hook then
+starts a watchdog that runs the new code.
 
 Hooks can run at the same time. Each hook takes a lock on a file in the
 session state directory before it reads or changes state. The kernel
@@ -196,15 +218,17 @@ closed on battery, you need an admin setting such as
 2. To run the tests, run `sh tests/test-plugin.sh`.
 3. To run the linter, run `bunx shellcheck -s sh bin/*.sh tests/*.sh`.
 
-The tests print TAP output and take about 6 seconds. They run a copy of the
+The tests print TAP output and take about 22 seconds. They run a copy of the
 plugin in a temporary directory with fake `herdr` and `caffeinate` programs.
 The tests never touch a linked copy of the plugin or your Herdr session.
 
 The script reads three environment variables that exist only for tests:
 `CAFFEINATED_BIN`, `CAFFEINATED_SERVER_PID`, and `CAFFEINATED_TIMEOUT`.
 
-If you edit `bin/caffeinated.sh` while a hook runs from it, the hook can
-fail. `sh` reads a script while it runs it.
+`sh` reads a script while it runs it. For this reason, all top-level code is
+in `main`, and the last line is `main "$@"; exit`. After `sh` reads that
+line, a file change cannot give new code to the process. Keep this line
+last when you edit the script.
 
 The script needs the `HERDR_PLUGIN_STATE_DIR` variable that Herdr sets. If
 you run it outside Herdr, it exits with code 2. To run an action by hand,
